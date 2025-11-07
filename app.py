@@ -8,11 +8,14 @@ st.set_page_config(page_title="NSF Termination Dashboard", layout="wide")
 
 # ---------- data loading (adapt this to your merge logic) ----------
 @st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False)
 def load_data():
-    data_dir = Path("data")
-    df_nsf   = pd.read_csv(data_dir / "nsf_terminations_all.csv")
-    df_flags = pd.read_csv(data_dir / "flagged_words_true.csv")
+    data_dir = Path("project1")  # <- var "data"
+    df_nsf   = pd.read_csv(data_dir / "nsf_terminations_airtable.csv")
+    df_flags = pd.read_csv(data_dir / "flagged_words_trump_admin.csv")
     df_cruz  = pd.read_csv(data_dir / "cruz_list.csv")
+
+
 
     # TODO: join/clean to match your notebook's df_merged schema
     # Below is a sketch—replace with your real merge:

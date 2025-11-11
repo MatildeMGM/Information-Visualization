@@ -6,33 +6,43 @@ from pathlib import Path
 
 st.set_page_config(page_title="NSF Termination Dashboard", layout="wide")
 
-# ---------- data loading (adapt this to your merge logic) ----------
-@st.cache_data(show_spinner=False)
+# ---------- data loading ----------
 @st.cache_data(show_spinner=False)
 def load_data():
-    data_dir = Path("project1")  # <- var "data"
-    df_nsf   = pd.read_csv(data_dir / "nsf_terminations_airtable.csv")
-    df_flags = pd.read_csv(data_dir / "flagged_words_trump_admin.csv")
-    df_cruz  = pd.read_csv(data_dir / "cruz_list.csv")
+    data_dir = Path(__file__).parent / "project1"   # robust on Streamlit Cloud
 
+    # read as strings where it helps merges be stable
+    df_nsf   = pd.read_csv(data_dir / "nsf_terminations_airtable.csv", dtype={"grant_id": str})
+    df_flags = pd.read_csv(data_dir / "flagged_words_trump_admin.csv", dtype={"grant_id": str})
+    df_cruz  = pd.read_csv(data_dir / "cruz_list.csv", dtype={"grant_id": str})
 
-
-    # TODO: join/clean to match your notebook's df_merged schema
-    # Below is a sketch—replace with your real merge:
-    # - ensure columns: status (0/1), reinstated (0/1),
-    #   has_flagged_word (bool), org_name, org_state, nsf_total_budget, grant_id, in_cruz_list (bool)
+    # merge (left joins keep all grants from nsf table)
     df = (
         df_nsf
         .merge(df_flags, on="grant_id", how="left")
         .merge(df_cruz,  on="grant_id", how="left")
-        .assign(
-            has_flagged_word=lambda d: d["has_flagged_word"].fillna(False).astype(bool),
-            in_cruz_list=lambda d: d["in_cruz_list"].fillna(False).astype(bool),
-            reinstated=lambda d: d["reinstated"].fillna(0).astype(int),
-            status=lambda d: d["status"].astype(int),
-            nsf_total_budget=lambda d: pd.to_numeric(d["nsf_total_budget"], errors="coerce")
-        )
     )
+
+    # ---- light schema guards (avoid KeyErrors if cols are missing) ----
+    for col, default in {
+        "has_flagged_word": False,
+        "in_cruz_list": False,
+        "reinstated": 0,
+        "status": 1,                 # assume 1=active unless stated 0
+        "nsf_total_budget": np.nan,
+        "org_name": "Unknown",
+        "org_state": "NA",
+    }.items():
+        if col not in df.columns:
+            df[col] = default
+
+    # types / cleaning
+    df["has_flagged_word"] = df["has_flagged_word"].fillna(False).astype(bool)
+    df["in_cruz_list"]     = df["in_cruz_list"].fillna(False).astype(bool)
+    df["reinstated"]       = pd.to_numeric(df["reinstated"], errors="coerce").fillna(0).astype(int)
+    df["status"]           = pd.to_numeric(df["status"], errors="coerce").fillna(1).astype(int)
+    df["nsf_total_budget"] = pd.to_numeric(df["nsf_total_budget"], errors="coerce")
+
     return df
 
 df_merged = load_data()
@@ -40,7 +50,7 @@ df_merged = load_data()
 st.title("NSF Terminations Overview")
 st.caption("Explore where terminations occur, which institutions are most affected, and correlations.")
 
-# ---------- Q4: flagged words (full-height left) ----------
+# ---------- Q4: flagged words ----------
 df_rate = (
     df_merged.assign(
         Flagged=np.where(df_merged['has_flagged_word'], 'Flagged', 'Not flagged'),
@@ -56,14 +66,16 @@ chart_flag = (
     .encode(
         x=alt.X('Flagged:N', title=None),
         y=alt.Y('CancelRate:Q', title='Share of Grants Terminated', axis=alt.Axis(format='.0%')),
-        color=alt.Color('Flagged:N', scale=alt.Scale(domain=['Flagged','Not flagged'], range=['indianred','#B0B0B0']), legend=None),
+        color=alt.Color('Flagged:N',
+                        scale=alt.Scale(domain=['Flagged','Not flagged'], range=['indianred','#B0B0B0']),
+                        legend=None),
         tooltip=[alt.Tooltip('CancelRate:Q', format='.1%')]
     )
     + alt.Chart(df_rate).mark_text(align='center', dy=-8, fontSize=12)
       .encode(x='Flagged:N', y='CancelRate:Q', text=alt.Text('CancelRate:Q', format='.1%'))
 ).properties(width=480, height=560)
 
-# ---------- Q3/Q2: institutions (wide) ----------
+# ---------- Q3/Q2: institutions ----------
 inst = (
     df_merged[df_merged['status'] == 0]
     .groupby('org_name', dropna=False)
@@ -87,14 +99,14 @@ chart_inst = (
       .encode(text='label_text:N')
 ).properties(width=620, height=300)
 
-# ---------- Q1: states (compact lollipop) ----------
+# ---------- Q1: states ----------
 state_counts = (
     df_merged[df_merged['status'] == 0]['org_state']
-    .value_counts().reset_index()
+    .fillna('NA').value_counts().reset_index()
 )
 state_counts.columns = ['state', 'Terminations']
 top_states = state_counts.head(15)
-max_x = int(top_states['Terminations'].max())
+max_x = int(top_states['Terminations'].max()) if len(top_states) else 0
 
 chart_states = (
     alt.Chart(top_states, title='Top 15 States by NSF Terminations')
@@ -106,7 +118,7 @@ chart_states = (
     + alt.Chart(top_states).mark_text(align='left', dx=10).encode(text='Terminations:Q')
 ).properties(width=300, height=240)
 
-# ---------- Q5: Cruz list (stacked) ----------
+# ---------- Q5: Cruz list ----------
 rates = (
     df_merged.groupby('in_cruz_list', as_index=False)
     .agg(CancelRate=('status', lambda s: (s == 0).mean()),
@@ -116,7 +128,7 @@ rates['Cruz'] = rates['in_cruz_list'].map({True: 'In Cruz list', False: 'Not in 
 
 two_part = rates.melt(id_vars='Cruz', value_vars=['CancelRate','ReinstateRate'],
                       var_name='Metric', value_name='Rate')
-two_part['Metric'] = two_part['Metric'].map({'CancelRate':'Cancelled','ReinstateRate':'Reinstated'})
+two_part['Metric'] = two_part['Metric'].map({'CancelRate':'Cancelled','Reinstated':'Reinstated'})
 
 chart_cruz = (
     alt.Chart(two_part, title='Cancelled + Reinstated by Cruz List')
@@ -124,12 +136,14 @@ chart_cruz = (
     .encode(
         x=alt.X('Cruz:N', title=None, sort=['Not in Cruz list','In Cruz list']),
         y=alt.Y('Rate:Q', axis=alt.Axis(format='.0%'), title='Share of Grants'),
-        color=alt.Color('Metric:N', scale=alt.Scale(domain=['Cancelled','Reinstated'], range=['indianred','#B0B0B0']), title=None),
+        color=alt.Color('Metric:N',
+                        scale=alt.Scale(domain=['Cancelled','Reinstated'], range=['indianred','#B0B0B0']),
+                        title=None),
         tooltip=['Cruz:N','Metric:N', alt.Tooltip('Rate:Q', format='.1%')]
     )
 ).properties(width=300, height=240)
 
-# ---------- Layout (single page) ----------
+# ---------- Layout ----------
 left, right = st.columns([1.05, 1.55], gap="medium")
 with left:
     st.subheader("Q4 · Flagged words & termination rate")

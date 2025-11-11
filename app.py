@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import altair as alt
+from vega_datasets import data
 from pathlib import Path
 
 st.set_page_config(page_title="NSF Termination Dashboard", layout="wide")
@@ -9,26 +10,95 @@ st.set_page_config(page_title="NSF Termination Dashboard", layout="wide")
 # ---------- data loading ----------
 @st.cache_data(show_spinner=False)
 def load_data():
-    data_dir = Path(__file__).parent / "project1"   # robust on Streamlit Cloud
+    data_dir = Path(__file__).parent / "project1"   # tjek at mappen hedder præcis 'project1'
 
-    # read as strings where it helps merges be stable
-    df_nsf   = pd.read_csv(data_dir / "nsf_terminations_airtable.csv", dtype={"grant_id": str})
-    df_flags = pd.read_csv(data_dir / "flagged_words_trump_admin.csv", dtype={"grant_id": str})
-    df_cruz  = pd.read_csv(data_dir / "cruz_list.csv", dtype={"grant_id": str})
+    # --- smart CSV-læser (fanger også ; fra dansk Excel) ---
+    def read_csv_smart(path):
+        import pandas as pd
+        try:
+            return pd.read_csv(path, sep=None, engine="python")
+        except Exception:
+            return pd.read_csv(path)
 
-    # merge (left joins keep all grants from nsf table)
-    df = (
-        df_nsf
-        .merge(df_flags, on="grant_id", how="left")
-        .merge(df_cruz,  on="grant_id", how="left")
-    )
+    # --- læs rå data ---
+    df_nsf   = read_csv_smart(data_dir / "nsf_terminations_airtable.csv")
+    df_cruz  = read_csv_smart(data_dir / "cruz_list.csv")
+    df_flags = read_csv_smart(data_dir / "flagged_words_trump_admin.csv")
 
-    # ---- light schema guards (avoid KeyErrors if cols are missing) ----
+    # --- normaliser kolonnenavne (lowercase + underscores) ---
+    norm = lambda s: str(s).strip().lower().replace(" ", "_")
+    df_nsf.columns   = [norm(c) for c in df_nsf.columns]
+    df_cruz.columns  = [norm(c) for c in df_cruz.columns]
+    df_flags.columns = [norm(c) for c in df_flags.columns]
+
+    # ---------- CRUZ: lav grant_id (string) + bool ----------
+    # dine rå data har grant_number + in_cruz_list i separate kolonner
+    if "grant_id" not in df_cruz.columns and "grant_number" in df_cruz.columns:
+        df_cruz["grant_id"] = df_cruz["grant_number"].astype(str).str.strip()
+
+    if "in_cruz_list" in df_cruz.columns:
+        # håndter TRUE/FALSE/1/0 som bool
+        df_cruz["in_cruz_list"] = (
+            df_cruz["in_cruz_list"]
+            .astype(str).str.strip().str.upper()
+            .map({"TRUE": True, "FALSE": False, "1": True, "0": False})
+            .fillna(False)
+            .astype(bool)
+        )
+    else:
+        df_cruz["in_cruz_list"] = False
+
+    # ---------- NSF: sikre typer + status mapping ----------
+    # nøglefelt skal være string for stabil merge
+    if "grant_id" in df_nsf.columns:
+        df_nsf["grant_id"] = df_nsf["grant_id"].astype(str).str.strip()
+
+    status_map = {"❌ Terminated": 0, "🔄 Possibly Reinstated": 1}
+    if "status" in df_nsf.columns:
+        df_nsf["status"] = (
+            df_nsf["status"].map(status_map).fillna(1).astype(int)
+        )
+    else:
+        df_nsf["status"] = 1
+
+    # budget/reinstated til numerisk
+    df_nsf["nsf_total_budget"] = pd.to_numeric(df_nsf.get("nsf_total_budget", np.nan), errors="coerce")
+    df_nsf["reinstated"]       = pd.to_numeric(df_nsf.get("reinstated", 0), errors="coerce").fillna(0).astype(int)
+
+    # hold kun relevante kolonner, hvis de findes
+    keep = [
+        "grant_id", "org_name", "org_state", "org_city",
+        "project_title", "abstract",
+        "nsf_total_budget", "status",
+        "termination_date", "reinstated", "reinstatement_date"
+    ]
+    df_nsf = df_nsf[[c for c in keep if c in df_nsf.columns]].copy()
+
+    # ---------- MERGE: NSF + CRUZ ----------
+    df = df_nsf.merge(df_cruz[["grant_id", "in_cruz_list"]], on="grant_id", how="left")
+
+    # ---------- FLAGGED WORDS: brug kolonnen 'fla' (eller 'flagged_word' hvis findes) ----------
+    import re
+    flag_col = "flagged_word" if "flagged_word" in df_flags.columns else ("fla" if "fla" in df_flags.columns else None)
+    if flag_col is not None:
+        words = (
+            df_flags[flag_col].dropna().astype(str).str.strip().str.lower().tolist()
+        )
+    else:
+        words = []
+
+    escaped = [re.escape(w) for w in words if w]
+    pattern = r'\b(' + '|'.join(escaped) + r')\b' if escaped else r'^\b$'  # tom matcher intet
+
+    text = (df.get("project_title", "").fillna("") + " " + df.get("abstract", "").fillna("")).str.lower()
+    df["has_flagged_word"] = text.str.contains(pattern, regex=True, na=False)
+
+    # ---------- slut: default-kolonner hvis noget mangler ----------
     for col, default in {
         "has_flagged_word": False,
         "in_cruz_list": False,
         "reinstated": 0,
-        "status": 1,                 # assume 1=active unless stated 0
+        "status": 1,
         "nsf_total_budget": np.nan,
         "org_name": "Unknown",
         "org_state": "NA",
@@ -36,14 +106,8 @@ def load_data():
         if col not in df.columns:
             df[col] = default
 
-    # types / cleaning
-    df["has_flagged_word"] = df["has_flagged_word"].fillna(False).astype(bool)
-    df["in_cruz_list"]     = df["in_cruz_list"].fillna(False).astype(bool)
-    df["reinstated"]       = pd.to_numeric(df["reinstated"], errors="coerce").fillna(0).astype(int)
-    df["status"]           = pd.to_numeric(df["status"], errors="coerce").fillna(1).astype(int)
-    df["nsf_total_budget"] = pd.to_numeric(df["nsf_total_budget"], errors="coerce")
-
     return df
+
 
 df_merged = load_data()
 
@@ -73,7 +137,7 @@ chart_flag = (
     )
     + alt.Chart(df_rate).mark_text(align='center', dy=-8, fontSize=12)
       .encode(x='Flagged:N', y='CancelRate:Q', text=alt.Text('CancelRate:Q', format='.1%'))
-).properties(width=480, height=560)
+).properties(width=300, height=560)
 
 # ---------- Q3/Q2: institutions ----------
 inst = (
@@ -97,26 +161,64 @@ chart_inst = (
     + alt.Chart(top15_inst).mark_text(align='left', dx=6, fontSize=11)
       .transform_calculate(label_text='format(datum.BudgetMillions, ".0f") + "M USD"')
       .encode(text='label_text:N')
-).properties(width=620, height=300)
+).properties(width=20, height=300)
 
 # ---------- Q1: states ----------
-state_counts = (
-    df_merged[df_merged['status'] == 0]['org_state']
-    .fillna('NA').value_counts().reset_index()
+# ---------- Q1: USA map med terminations som cirkler ----------
+# Basiskort
+map = alt.topo_feature(data.us_10m.url, feature='states')
+usChart = (
+    alt.Chart(map)
+    .mark_geoshape(fill='lightgray', stroke='white')
+    .properties(width=600, height=360)
+    .project('albersUsa')
 )
-state_counts.columns = ['state', 'Terminations']
-top_states = state_counts.head(15)
-max_x = int(top_states['Terminations'].max()) if len(top_states) else 0
 
-chart_states = (
-    alt.Chart(top_states, title='Top 15 States by NSF Terminations')
+# Aggreger terminations pr. state (unikke grant_id med status==0)
+df_q1 = (
+    df_merged.loc[df_merged['status'] == 0, ['org_state', 'grant_id']]
+    .assign(org_state=lambda d: d['org_state'].astype(str).str.upper().str.strip())
+    .groupby('org_state', as_index=False)['grant_id'].nunique()
+    .rename(columns={'grant_id': 'Terminations'})
+)
+
+# Map fra state-abbrev til fulde navne (inkl. DC)
+abbr2name = {
+    'AL':'Alabama','AK':'Alaska','AZ':'Arizona','AR':'Arkansas','CA':'California','CO':'Colorado',
+    'CT':'Connecticut','DE':'Delaware','FL':'Florida','GA':'Georgia','HI':'Hawaii','ID':'Idaho',
+    'IL':'Illinois','IN':'Indiana','IA':'Iowa','KS':'Kansas','KY':'Kentucky','LA':'Louisiana',
+    'ME':'Maine','MD':'Maryland','MA':'Massachusetts','MI':'Michigan','MN':'Minnesota','MS':'Mississippi',
+    'MO':'Missouri','MT':'Montana','NE':'Nebraska','NV':'Nevada','NH':'New Hampshire','NJ':'New Jersey',
+    'NM':'New Mexico','NY':'New York','NC':'North Carolina','ND':'North Dakota','OH':'Ohio','OK':'Oklahoma',
+    'OR':'Oregon','PA':'Pennsylvania','RI':'Rhode Island','SC':'South Carolina','SD':'South Dakota',
+    'TN':'Tennessee','TX':'Texas','UT':'Utah','VT':'Vermont','VA':'Virginia','WA':'Washington',
+    'WV':'West Virginia','WI':'Wisconsin','WY':'Wyoming','DC':'District of Columbia'
+}
+df_q1['state_name'] = df_q1['org_state'].map(abbr2name)
+
+# Fjern rækker uden match til navn (ukendte koder/NaN)
+df_q1 = df_q1.dropna(subset=['state_name'])
+
+# Hent lat/lon for statshovedstæder til at placere cirkler
+capitals = data.us_state_capitals.url
+
+terminationsMap = (
+    alt.Chart(df_q1, title='Terminated NSF Grants distributed by State')
+    .transform_lookup(
+        lookup='state_name',
+        from_=alt.LookupData(capitals, key='state', fields=['state', 'lat', 'lon'])
+    )
+    .transform_filter(alt.datum.lat != None)
+    .mark_circle(size=120, opacity=0.85, stroke='white', strokeWidth=0.4)
     .encode(
-        y=alt.Y('state:N', sort='-x', title=None),
-        x=alt.X('Terminations:Q', title=None, scale=alt.Scale(domain=[0, max_x + 10]))
-    ).mark_rule(color='lightgray')
-    + alt.Chart(top_states).mark_circle(color='firebrick').encode(size=alt.Size('Terminations:Q', legend=None))
-    + alt.Chart(top_states).mark_text(align='left', dx=10).encode(text='Terminations:Q')
-).properties(width=300, height=240)
+        longitude='lon:Q',
+        latitude='lat:Q',
+        color=alt.Color('Terminations:Q', title='Terminations', scale=alt.Scale(scheme='reds')),
+        tooltip=['state_name:N', 'org_state:N', 'Terminations:Q']
+    )
+)
+
+chart_states = (usChart + terminationsMap).configure_view(stroke=None)
 
 # ---------- Q5: Cruz list ----------
 rates = (
@@ -128,7 +230,8 @@ rates['Cruz'] = rates['in_cruz_list'].map({True: 'In Cruz list', False: 'Not in 
 
 two_part = rates.melt(id_vars='Cruz', value_vars=['CancelRate','ReinstateRate'],
                       var_name='Metric', value_name='Rate')
-two_part['Metric'] = two_part['Metric'].map({'CancelRate':'Cancelled','Reinstated':'Reinstated'})
+two_part['Metric'] = two_part['Metric'].map({'CancelRate':'Cancelled','ReinstateRate':'Reinstated'})
+
 
 chart_cruz = (
     alt.Chart(two_part, title='Cancelled + Reinstated by Cruz List')
@@ -144,21 +247,28 @@ chart_cruz = (
 ).properties(width=300, height=240)
 
 # ---------- Layout ----------
-left, right = st.columns([1.05, 1.55], gap="medium")
-with left:
-    st.subheader("Q4 · Flagged words & termination rate")
-    st.altair_chart(chart_flag, width="stretch")
 
-with right:
-    st.subheader("Q2/Q3 · Institutions most affected")
-    st.altair_chart(chart_inst, width="stretch")
-    st.divider()
-    r1, r2 = st.columns(2, gap="medium")
-    with r1:
-        st.subheader("Q1 · States")
-        st.altair_chart(chart_states, width="stretch")
-    with r2:
-        st.subheader("Q5 · Cruz list & reinstatements")
-        st.altair_chart(chart_cruz, width="stretch")
+# Øverste række: Q2/Q3 — institutioner
+st.subheader("Q2/Q3 · Institutions most affected")
+st.altair_chart(chart_inst, use_container_width=True)
+st.divider()
 
+# Midterste række: Q4 — flagged words
+st.subheader("Q4 · Flagged words & termination rate")
+st.altair_chart(chart_flag, use_container_width=True)
+st.divider()
+
+# Nederste række: Q5 (Cruz) og Q1 (map) side om side
+col1, col2 = st.columns(2, gap="medium")
+
+with col1:
+    st.subheader("Q5 · Cruz list & reinstatements")
+    st.altair_chart(chart_cruz, use_container_width=True)
+
+with col2:
+    st.subheader("Q1 · States")
+    st.altair_chart(chart_states, use_container_width=True)
+
+# Fodnote
 st.caption("Answers Q1–Q5 on one page. Notebook with methods & extra visuals: `project_new.ipynb`.")
+

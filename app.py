@@ -1,3 +1,4 @@
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -24,6 +25,26 @@ header {visibility: visible;}
 #MainMenu, footer {visibility: hidden;}
 </style>
 """, unsafe_allow_html=True)
+
+# ---------------------------------------------------------
+# COLORS + ALTAIR GLOBAL CONFIG (MATCH NOTEBOOK)
+# ---------------------------------------------------------
+PALETTE_RED         = "#6CBAC7"   # base teal (used for budgets)
+PALETTE_GREY        = "#BFC5CE"   # neutral grey
+PALETTE_FLAGGED     = "#2F7F94"   # darker teal for flagged / cancelled focus
+PALETTE_CANCELLED   = "#2F7F94"   # cancelled in Cruz chart
+PALETTE_REINSTATED  = "#B5D5DB"   # reinstated in Cruz chart
+
+alt.themes.enable("none")
+alt.data_transformers.disable_max_rows()
+
+def style_chart(chart: alt.Chart) -> alt.Chart:
+    """Apply the same axis/view styling as in the notebook."""
+    return (
+        chart
+        .configure_axis(grid=False, domain=False)
+        .configure_view(stroke=None)
+    )
 
 # ---------------------------------------------------------
 # DATA LOADING
@@ -90,150 +111,190 @@ df_merged = load_data()
 st.markdown("# NSF Terminations Overview")
 st.caption("Flagged words · Institutions · Cruz list · State distribution · Answers Q1–Q5")
 
-# Heights
+# Heights (layout skal bevares, så vi lader disse stå)
 FLAG_H = 560     # tall chart on the left (≈ one 15″ screen height)
 SMALL_H = 240    # compact height for the two top-right charts
 MAP_H = 360      # short map row height
 
 # ---------------------------------------------------------
-# CHART A – Flagged words (tall)
+# CHART A – Flagged words (tall)  [MATCH NOTEBOOK]
 # ---------------------------------------------------------
 df_rate = (
     df_merged.assign(
-        Flagged=np.where(df_merged['has_flagged_word'], 'Flagged', 'Not flagged'),
-        Cancelled=(df_merged['status'] == 0).astype(int)
+        Flagged=np.where(df_merged["has_flagged_word"], "Flagged", "Not flagged"),
+        Cancelled=(df_merged["status"] == 0).astype(int)
     )
-    .groupby('Flagged', as_index=False)
-    .agg(CancelRate=('Cancelled', 'mean'))
+    .groupby("Flagged", as_index=False)
+    .agg(CancelRate=("Cancelled", "mean"))
 )
 
 chart_flag = (
     alt.Chart(df_rate)
-    .mark_bar(size=80)
+    .mark_bar(size=60)
     .encode(
-        x=alt.X('Flagged:N', title=None),
-        y=alt.Y('CancelRate:Q', title='Share of grants terminated', axis=alt.Axis(format='.0%')),
-        color=alt.Color('Flagged:N',
-                        scale=alt.Scale(domain=['Flagged','Not flagged'],
-                                        range=['indianred','#B0B0B0']),
-                        legend=None),
-        tooltip=[alt.Tooltip('CancelRate:Q', format='.1%')]
+        x=alt.X(
+            "Flagged:N",
+            title=None,
+            axis=alt.Axis(labelAngle=0, labelFontSize=12, grid=False),
+        ),
+        y=alt.Y(
+            "CancelRate:Q",
+            title="Share of grants terminated",
+            axis=alt.Axis(format=".0%", labelFontSize=11, grid=False),
+        ),
+        color=alt.Color(
+            "Flagged:N",
+            scale=alt.Scale(
+                domain=["Flagged", "Not flagged"],
+                range=[PALETTE_FLAGGED, PALETTE_GREY],
+            ),
+            legend=None,
+        ),
+        tooltip=[alt.Tooltip("CancelRate:Q", format=".1%")],
     )
-    + alt.Chart(df_rate).mark_text(align='center', dy=-8, fontSize=12)
-      .encode(x='Flagged:N', y='CancelRate:Q', text=alt.Text('CancelRate:Q', format='.1%'))
-).properties(width='container', height=FLAG_H)
+    + alt.Chart(df_rate)
+    .mark_text(align="center", dy=-8, fontSize=11, color="black")
+    .encode(
+        x="Flagged:N",
+        y="CancelRate:Q",
+        text=alt.Text("CancelRate:Q", format=".1%")
+    )
+).properties(width="container", height=FLAG_H)
+
+chart_flag = style_chart(chart_flag)
 
 # ---------------------------------------------------------
-# CHART B – Institutions (your exact code, titles removed)
+# CHART B – Institutions (Top 10)  [MATCH NOTEBOOK COLORS]
 # ---------------------------------------------------------
-# Bar chart of top 10 institutions by total cancelled budget (status = 0)
 tmp = df_merged.copy()
-tmp['nsf_total_budget'] = pd.to_numeric(tmp['nsf_total_budget'], errors='coerce')
+tmp["nsf_total_budget"] = pd.to_numeric(tmp["nsf_total_budget"], errors="coerce")
 
-# Data
 inst_data = (
-    tmp[tmp['status'] == 0]
-    .groupby('org_name', dropna=False)
+    tmp[tmp["status"] == 0]
+    .groupby("org_name", dropna=False)
     .agg(
-        BudgetCancelled=('nsf_total_budget', 'sum'),
-        CancelledGrants=('nsf_total_budget', 'count')
+        BudgetCancelled=("nsf_total_budget", "sum"),
+        CancelledGrants=("nsf_total_budget", "count"),
     )
     .reset_index()
 )
 
-# Convert budget to millions
-inst_data['BudgetMillions'] = inst_data['BudgetCancelled'] / 1e6
+inst_data["BudgetMillions"] = inst_data["BudgetCancelled"] / 1e6
+top10 = inst_data.sort_values("BudgetMillions", ascending=False).head(10).copy()
 
-# Top 10 institutions with highest total cancelled budget
-top10 = inst_data.sort_values('BudgetMillions', ascending=False).head(10)
+xmax = float(top10["BudgetMillions"].max()) if len(top10) else 1.0
 
-# Determine max value for x-axis padding
-xmax = float(top10['BudgetMillions'].max())
-
-# Base chart
 base = alt.Chart(top10).encode(
     y=alt.Y(
-        'org_name:N',
-        sort=top10['org_name'].tolist(),
-        title='Institution',
-        axis=alt.Axis(labelLimit=0)  # ensures full institution names are shown
+        "org_name:N",
+        sort=top10["org_name"].tolist(),
+        title=None,                     # matcher notebook (ingen y-titel)
+        axis=alt.Axis(labelLimit=0),
     ),
     x=alt.X(
-        'BudgetMillions:Q',
-        title='Total Cancelled Budget (M USD)',
-        axis=alt.Axis(format='.0f'),
-        scale=alt.Scale(domain=[0, xmax * 1.08])  # adds space so labels fit inside chart
-    )
+        "BudgetMillions:Q",
+        title="Total Cancelled Budget (M USD)",
+        axis=alt.Axis(labelFontSize=11, grid=False),
+        scale=alt.Scale(domain=[0, xmax * 1.08]),
+    ),
 )
 
-# Bars (M USD)
-bars = base.mark_bar(color='indianred').encode(
+bars = base.mark_bar(color=PALETTE_RED).encode(
     tooltip=[
-        alt.Tooltip('org_name:N', title='Institution'),
-        alt.Tooltip('BudgetMillions:Q', title='Total Cancelled Budget (M USD)', format='.1f'),
-        alt.Tooltip('CancelledGrants:Q', title='Number of Terminated Grants')
+        alt.Tooltip("org_name:N", title="Institution"),
+        alt.Tooltip("BudgetMillions:Q", title="Total Cancelled Budget (M USD)", format=".1f"),
+        alt.Tooltip("CancelledGrants:Q", title="Number of Terminated Grants"),
     ]
 )
 
-# Labels: number of terminated grants
-labels = base.mark_text(
-    align='left',
-    dx=6,                # offset text slightly to the right of bar
-    fontSize=11,
-    color='black'
-).transform_calculate(
-    label_text='format(datum.CancelledGrants, ".0f") + " grants"'
-).encode(text='label_text:N')
+labels = (
+    base.mark_text(
+        align="left",
+        dx=4,
+        baseline="middle",
+        fontSize=11,
+        color="black",
+    )
+    .transform_calculate(
+        label_text='format(datum.CancelledGrants, ".0f") + " grants"'
+    )
+    .encode(text="label_text:N")
+)
 
-# Combine and style
 chart_inst = (bars + labels).properties(
     width=550,
-    height=26 * len(top10) + 20,  # dynamic height to ensure all 10 institutions are visible
-    title='Top 10 Institutions Most Affected by Cancelled Budget'
-).configure_axis(
-    grid=False
-).configure_view(
-    stroke=None
+    height=26 * len(top10) + 20,
 )
 
+chart_inst = style_chart(chart_inst)
 
 # ---------------------------------------------------------
-# CHART C – Cruz list (compact)
+# CHART C – Cruz list (grouped bars)  [MATCH NOTEBOOK]
 # ---------------------------------------------------------
 rates = (
-    df_merged.groupby('in_cruz_list', as_index=False)
-    .agg(CancelRate=('status', lambda s: (s == 0).mean()),
-         ReinstateRate=('reinstated', 'mean'))
+    df_merged.groupby("in_cruz_list", as_index=False)
+    .agg(
+        CancelRate=("status", lambda s: (s == 0).mean()),
+        ReinstateRate=("reinstated", "mean"),
+    )
 )
-rates['Cruz'] = rates['in_cruz_list'].map({True: 'In Cruz list', False: 'Not in Cruz list'})
-two_part = rates.melt(id_vars='Cruz', value_vars=['CancelRate','ReinstateRate'],
-                      var_name='Metric', value_name='Rate')
-two_part['Metric'] = two_part['Metric'].map({'CancelRate':'Cancelled','ReinstateRate':'Reinstated'})
+rates["Cruz"] = rates["in_cruz_list"].map({True: "In Cruz list", False: "Not in Cruz list"})
+
+two_part = rates.melt(
+    id_vars="Cruz",
+    value_vars=["CancelRate", "ReinstateRate"],
+    var_name="Metric",
+    value_name="Rate",
+)
+two_part["Metric"] = two_part["Metric"].map(
+    {"CancelRate": "Cancelled", "ReinstateRate": "Reinstated"}
+)
 
 chart_cruz = (
     alt.Chart(two_part)
     .mark_bar()
     .encode(
-        x=alt.X('Cruz:N', title=None, sort=['Not in Cruz list','In Cruz list']),
-        y=alt.Y('Rate:Q', axis=alt.Axis(format='.0%'), title='Share of grants'),
-        color=alt.Color('Metric:N',
-                        scale=alt.Scale(domain=['Cancelled','Reinstated'],
-                                        range=['indianred','#B0B0B0']),
-                        title=None),
-        tooltip=['Cruz:N','Metric:N', alt.Tooltip('Rate:Q', format='.1%')]
+        x=alt.X(
+            "Cruz:N",
+            title=None,
+            sort=["Not in Cruz list", "In Cruz list"],
+            axis=alt.Axis(labelAngle=0, labelFontSize=12, grid=False),
+        ),
+        xOffset="Metric:N",  # side-by-side bars (grouped)
+        y=alt.Y(
+            "Rate:Q",
+            title="Share of grants",
+            stack=None,
+            axis=alt.Axis(format=".0%", labelFontSize=11, grid=False),
+        ),
+        color=alt.Color(
+            "Metric:N",
+            scale=alt.Scale(
+                domain=["Cancelled", "Reinstated"],
+                range=[PALETTE_CANCELLED, PALETTE_REINSTATED],
+            ),
+            title=None,
+        ),
+        tooltip=[
+            "Cruz:N",
+            "Metric:N",
+            alt.Tooltip("Rate:Q", format=".1%"),
+        ],
     )
-).properties(width='container', height=SMALL_H)
+).properties(width="container", height=SMALL_H)
+
+chart_cruz = style_chart(chart_cruz)
 
 # ---------------------------------------------------------
-# CHART D – USA map (centered under right two charts)
+# CHART D – USA map (centered under right two charts) [MATCH NOTEBOOK]
 # ---------------------------------------------------------
-map_topo = alt.topo_feature(data.us_10m.url, feature='states')
+map_topo = alt.topo_feature(data.us_10m.url, feature="states")
 
 df_q1 = (
-    df_merged.loc[df_merged['status'] == 0, ['org_state', 'grant_id']]
-    .assign(org_state=lambda d: d['org_state'].astype(str).str.upper().str.strip())
-    .groupby('org_state', as_index=False)['grant_id'].nunique()
-    .rename(columns={'grant_id': 'Terminations'})
+    df_merged.loc[df_merged["status"] == 0, ["org_state", "grant_id"]]
+    .assign(org_state=lambda d: d["org_state"].astype(str).str.upper().str.strip())
+    .groupby("org_state", as_index=False)["grant_id"].nunique()
+    .rename(columns={"grant_id": "Terminations"})
 )
 
 abbr2name = {
@@ -247,36 +308,57 @@ abbr2name = {
     'TN':'Tennessee','TX':'Texas','UT':'Utah','VT':'Vermont','VA':'Virginia','WA':'Washington',
     'WV':'West Virginia','WI':'Wisconsin','WY':'Wyoming','DC':'District of Columbia'
 }
-df_q1['state_name'] = df_q1['org_state'].map(abbr2name)
-df_q1 = df_q1.dropna(subset=['state_name'])
+df_q1["state_name"] = df_q1["org_state"].map(abbr2name)
+df_q1 = df_q1.dropna(subset=["state_name"])
+
 capitals = data.us_state_capitals.url
 
-us_base = alt.Chart(map_topo).mark_geoshape(fill='lightgray', stroke='white').project('albersUsa')
+us_base = (
+    alt.Chart(map_topo)
+    .mark_geoshape(fill="lightgray", stroke="white")
+    .project("albersUsa")
+)
+
 points = (
     alt.Chart(df_q1)
-    .transform_lookup(lookup='state_name',
-                      from_=alt.LookupData(capitals, key='state', fields=['state','lat','lon']))
+    .transform_lookup(
+        lookup="state_name",
+        from_=alt.LookupData(capitals, key="state", fields=["state", "lat", "lon"]),
+    )
     .transform_filter(alt.datum.lat != None)
-    .mark_circle(size=120, opacity=0.85, stroke='white', strokeWidth=0.4)
+    .mark_circle(size=120, opacity=0.9, stroke="black", strokeWidth=0.6)
     .encode(
-        longitude='lon:Q',
-        latitude='lat:Q',
-        color=alt.Color('Terminations:Q', title='Terminations', scale=alt.Scale(scheme='reds')),
-        tooltip=['state_name:N','org_state:N','Terminations:Q']
+        longitude="lon:Q",
+        latitude="lat:Q",
+        color=alt.Color(
+            "Terminations:Q",
+            title="Terminations",
+            scale=alt.Scale(
+                range=["#F1F4F7", "#B5D5DB", "#78B8C4", "#2F7F94"]
+            ),
+        ),
+        tooltip=["state_name:N", "org_state:N", "Terminations:Q"],
     )
 )
-chart_states = (us_base + points).properties(width='container', height=MAP_H).configure_view(stroke=None)
+
+chart_states = (us_base + points).properties(
+    width="container",
+    height=MAP_H,
+)
+
+chart_states = style_chart(chart_states)
 
 # ---------- LAYOUT: left = tall chart, right = two small + centered map ----------
+# (Beholder samme forhold og højder som i din nuværende app)
+
 FLAG_H  = 560   # tall left chart
 SMALL_H = 230   # small top-right charts
-MAP_H   = 320   # map height (fits under the two small charts)
+MAP_H   = 320   # map height
 
-# Make sure the charts use these heights (no per-chart titles)
-chart_flag  = chart_flag.properties(height=FLAG_H,  width='container')
-chart_inst  = chart_inst.properties(height=SMALL_H, width='container')
-chart_cruz  = chart_cruz.properties(height=SMALL_H, width='container')
-chart_states= chart_states.properties(height=MAP_H,  width='container')
+chart_flag   = chart_flag.properties(height=FLAG_H,  width="container")
+chart_inst   = chart_inst.properties(height=SMALL_H, width="container")
+chart_cruz   = chart_cruz.properties(height=SMALL_H, width="container")
+chart_states = chart_states.properties(height=MAP_H,  width="container")
 
 # Two main columns
 left_col, right_col = st.columns([1.05, 2.35], gap="small")
@@ -303,3 +385,4 @@ with right_col:
 
 # Single page caption (no individual chart titles anywhere)
 st.caption("Answers Q1–Q5 on one page.")
+

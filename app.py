@@ -220,7 +220,7 @@ labels = (
         dx=4,
         baseline="middle",
         fontSize=11,
-        color="black",
+        color="white",
     )
     .transform_calculate(
         label_text='format(datum.CancelledGrants, ".0f") + " grants"'
